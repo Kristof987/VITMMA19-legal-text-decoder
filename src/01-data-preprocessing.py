@@ -1,7 +1,3 @@
-"""
-TODO: leírás
-"""
-
 import pandas as pd
 import numpy as np
 import json
@@ -10,18 +6,11 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split
 
 from config import RANDOM_SEED, TEST_SIZE, VAL_SIZE
-
-PROCESSED_DIR = Path("/data/processed")
-OUTPUT_DIR = Path("/data/output")
+from convert_raw_data import PROCESSED_DIR
 
 np.random.seed(RANDOM_SEED)
 
-
 def clean_text(text):
-    """
-    Clean and normalize text data.
-    """
-
     text = re.sub(r'\s+', ' ', text)
     text = text.strip()
     text = text.replace('\xa0', ' ')
@@ -30,9 +19,6 @@ def clean_text(text):
 
 
 def validate_data(df, dataset_name):
-    """
-    Validate dataset for quality issues.
-    """
     print(f"Validating {dataset_name}")
     
     missing = df.isnull().sum()
@@ -72,19 +58,6 @@ def validate_data(df, dataset_name):
 
 
 def augment_text(text, augmentation_type='synonym'):
-    """
-    Simple text augmentation for regularization.
-    
-    Data augmentation is a regularization technique that helps prevent overfitting
-    by creating variations of training samples.
-    
-    Args:
-        text: Input text
-        augmentation_type: Type of augmentation ('synonym', 'swap', 'delete')
-        
-    Returns:
-        Augmented text
-    """
     words = text.split()
     
     if len(words) < 3:
@@ -104,19 +77,6 @@ def augment_text(text, augmentation_type='synonym'):
 
 
 def create_augmented_samples(df, augmentation_ratio=0.2, min_samples_per_class=200):
-    """
-    Create augmented samples for minority classes to balance the dataset.
-    
-    This is a regularization technique that helps with class imbalance.
-    
-    Args:
-        df: Input DataFrame
-        augmentation_ratio: Ratio of samples to augment
-        min_samples_per_class: Minimum samples per class before augmentation
-        
-    Returns:
-        DataFrame with augmented samples
-    """
     augmented_samples = []
     
     for label in df['label'].unique():
@@ -145,24 +105,6 @@ def create_augmented_samples(df, augmentation_ratio=0.2, min_samples_per_class=2
 
 
 def stratified_split(df, test_size, val_size, random_state=42):
-    """
-    Perform stratified train/validation/test split.
-    
-    Stratified splitting ensures that the label distribution is preserved
-    across all splits, which is important for:
-    - Avoiding overfitting (proper validation)
-    - Reliable performance estimation
-    - Handling class imbalance
-    
-    Args:
-        df: Input DataFrame
-        test_size: Proportion for test set
-        val_size: Proportion for validation set (from remaining after test)
-        random_state: Random seed for reproducibility
-        
-    Returns:
-        train_df, val_df, test_df
-    """
     train_val_df, test_df = train_test_split(
         df,
         test_size=test_size,
@@ -184,12 +126,6 @@ def stratified_split(df, test_size, val_size, random_state=42):
 
 
 def compute_statistics(train_df, val_df, test_df):
-    """
-    Compute and display statistics for all splits.
-    
-    Args:
-        train_df, val_df, test_df: DataFrames for each split
-    """
     print("Dataset split statistics")
     
     for name, df in [('Train', train_df), ('Validation', val_df), ('Test', test_df)]:
@@ -209,13 +145,6 @@ def compute_statistics(train_df, val_df, test_df):
 
 
 def save_splits(train_df, val_df, test_df, output_dir):
-    """
-    Save train/val/test splits to disk.
-    
-    Args:
-        train_df, val_df, test_df: DataFrames to save
-        output_dir: Output directory path
-    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -233,16 +162,6 @@ def save_splits(train_df, val_df, test_df, output_dir):
     print(f"  {output_dir / 'test.csv'} ({len(test_df)} samples)")
 
 def main():
-    """
-    Main preprocessing pipeline.
-    
-    Pipeline steps:
-    1. Load processed data from neptun_data.csv
-    2. Validate and clean data
-    3. Apply text augmentation for regularization
-    4. Perform stratified train/val/test split
-    5. Save preprocessed splits
-    """
     print("\nDATA PREPROCESSING PIPELINE")
 
     print("\nLoading processed data...")

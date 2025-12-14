@@ -1,19 +1,38 @@
-"""
-Utility functions for the legal text classification project.
-"""
-
+import logging
+import sys
 import torch
 import numpy as np
 import random
 
 
-def set_seed(seed=42):
-    """
-    Set random seeds for reproducibility.
+def setup_logger(name="legal_text_classifier", level=logging.INFO):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
     
-    Args:
-        seed: Random seed value
-    """
+    logger.handlers = []
+    
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(level)
+    
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    handler.setFormatter(formatter)
+    
+    logger.addHandler(handler)
+    
+    return logger
+
+
+def get_logger(name="legal_text_classifier"):
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        return setup_logger(name)
+    return logger
+
+
+def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

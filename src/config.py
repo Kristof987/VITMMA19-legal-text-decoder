@@ -1,22 +1,27 @@
-"""
-Configuration file for training hyperparameters and paths.
-All configurable parameters are centralized here.
-"""
-
 from pathlib import Path
 
-# ============================================================================
-# PATHS
-# ============================================================================
+PROCESSED_DIR = Path("/data/processed")
+OUTPUT_DIR = Path("/data/output")
 DATA_DIR = Path("/data/processed")
 LOG_DIR = Path("/log")
 MODEL_DIR = Path("/data/output/models")
 CHECKPOINT_DIR = Path("/data/output/checkpoints")
 TENSORBOARD_DIR = Path("/data/output/tensorboard")
+RAW_DIR = Path("/data/raw/legaltextdecoder")
+EXCLUDE_FOLDERS = ["consensus"]
+EVAL_FILE = RAW_DIR / "consensus" / "I1TLYH.json"
+INFERENCE_FILE = RAW_DIR / "E77YIW" / "mak_aszf_cimkezes.json"
+EXCLUDE_FILES = [
+    "mak_aszf_cimkezes.json"    #E77YIW folder (used for inference)
+]
+LABEL_MAPPING = {
+    "1-Nagyon nehezen érthető": 1,
+    "2-Nehezen érthető": 2,
+    "3-Többé/kevésbé megértem": 3,
+    "4-Érthető": 4,
+    "5-Könnyen érthető": 5
+}
 
-# ============================================================================
-# MODEL CONFIGURATION
-# ============================================================================
 MODEL_NAME = "SZTAKI-HLT/hubert-base-cc"
 NUM_CLASSES = 5
 MAX_LENGTH = 256
@@ -25,9 +30,6 @@ CLASSIFIER_HIDDEN_SIZE = 384
 TEST_SIZE = 0.15
 VAL_SIZE = 0.15
 
-# ============================================================================
-# TRAINING HYPERPARAMETERS
-# ============================================================================
 EPOCHS = 10
 BATCH_SIZE = 16
 LEARNING_RATE = 2e-5

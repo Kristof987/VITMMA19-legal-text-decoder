@@ -1,8 +1,3 @@
-"""
-Evaluation script for legal text difficulty classification.
-Evaluates both baseline and fine-tuned HuBERT models on test set.
-"""
-
 import os
 import json
 import numpy as np
@@ -26,13 +21,15 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from config import *
+from utils import setup_logger
+
+logger = setup_logger("evaluation")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+logger.info(f"Using device: {device}")
 print(f"Using device: {device}")
 
 class LegalTextDataset(Dataset):
-    """PyTorch Dataset for legal text classification."""
-    
     def __init__(self, texts, labels, tokenizer, max_length=MAX_LENGTH):
         self.texts = texts
         self.labels = labels
@@ -63,8 +60,6 @@ class LegalTextDataset(Dataset):
         }
 
 class HuBERTClassifier(nn.Module):
-    """HuBERT-based text classifier."""
-    
     def __init__(self, model_name=MODEL_NAME, num_classes=NUM_CLASSES, 
                  dropout_rate=DROPOUT_RATE, hidden_size=CLASSIFIER_HIDDEN_SIZE):
         super(HuBERTClassifier, self).__init__()
@@ -96,9 +91,6 @@ class HuBERTClassifier(nn.Module):
         return logits
 
 def evaluate_model(model, dataloader, device):
-    """
-    Evaluate model and return predictions and labels.
-    """
     model.eval()
     all_preds = []
     all_labels = []
@@ -127,9 +119,6 @@ def evaluate_model(model, dataloader, device):
 
 
 def compute_metrics(y_true, y_pred):
-    """
-    Compute comprehensive evaluation metrics.
-    """
     metrics = {
         'accuracy': accuracy_score(y_true, y_pred),
         'f1_weighted': f1_score(y_true, y_pred, average='weighted'),
@@ -154,9 +143,6 @@ def compute_metrics(y_true, y_pred):
 
 
 def plot_confusion_matrix(y_true, y_pred, labels, save_path):
-    """
-    Plot and save confusion matrix.
-    """
     cm = confusion_matrix(y_true, y_pred)
     
     plt.figure(figsize=(10, 8))
@@ -180,9 +166,6 @@ def plot_confusion_matrix(y_true, y_pred, labels, save_path):
 
 
 def plot_per_class_metrics(metrics, labels, save_path):
-    """
-    Plot per-class F1, Precision, Recall.
-    """
     per_class = metrics['per_class']
     
     x = np.arange(len(labels))
@@ -211,9 +194,6 @@ def plot_per_class_metrics(metrics, labels, save_path):
 
 
 def evaluate_baseline(test_df):
-    """
-    Evaluate baseline TF-IDF + Logistic regression model.
-    """
     print("\n" + "="*60)
     print("EVALUATING BASELINE MODEL")
     print("="*60)
@@ -224,7 +204,7 @@ def evaluate_baseline(test_df):
     clf = joblib.load(MODEL_DIR / "baseline_model.pkl")
     
     X_test = vectorizer.transform(test_df['text'])
-    y_test = test_df['label'].values - 1  # Convert to 0-4
+    y_test = test_df['label'].values - 1
     
     y_pred = clf.predict(X_test)
     
@@ -241,9 +221,6 @@ def evaluate_baseline(test_df):
 
 
 def evaluate_hubert(test_df):
-    """
-    Evaluate fine-tuned HuBERT model.
-    """
     print("\n" + "="*60)
     print("EVALUATING HUBERT MODEL")
     print("="*60)
@@ -377,7 +354,6 @@ def main():
         eval_dir / "confusion_matrix_hubert.png"
     )
     
-    # Per-class metrics
     plot_per_class_metrics(
         baseline_metrics,
         label_names_list,
@@ -422,7 +398,7 @@ def main():
     
     predictions_df = pd.DataFrame({
         'text': test_df['text'].values,
-        'true_label': y_test + 1,  # Convert back to 1-5
+        'true_label': y_test + 1,
         'baseline_pred': baseline_pred + 1,
         'hubert_pred': hubert_pred + 1,
         'true_label_name': [LABEL_NAMES[i+1] for i in y_test],
@@ -430,7 +406,6 @@ def main():
         'hubert_pred_name': [LABEL_NAMES[i+1] for i in hubert_pred]
     })
     
-    # Add prediction probabilities for HuBERT
     for i in range(NUM_CLASSES):
         predictions_df[f'hubert_prob_class_{i+1}'] = hubert_probs[:, i]
     

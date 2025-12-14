@@ -1,29 +1,7 @@
 import json
-from pathlib import Path
 import pandas as pd
 
-RAW_DIR = Path("/data/raw/legaltextdecoder")
-PROCESSED_DIR = Path("/data/processed")
-EXCLUDE_FOLDERS = ["consensus"]
-
-# Evaluation file (consensus data)
-EVAL_FILE = RAW_DIR / "consensus" / "I1TLYH.json"
-
-# Inference demo file (unseen data)
-INFERENCE_FILE = RAW_DIR / "E77YIW" / "mak_aszf_cimkezes.json"
-
-# Files to exclude from training
-EXCLUDE_FILES = [
-    "mak_aszf_cimkezes.json"    # E77YIW folder (used for inference)
-]
-
-LABEL_MAPPING = {
-    "1-Nagyon nehezen érthető": 1,
-    "2-Nehezen érthető": 2,
-    "3-Többé/kevésbé megértem": 3,
-    "4-Érthető": 4,
-    "5-Könnyen érthető": 5
-}
+from config import PROCESSED_DIR, RAW_DIR, EXCLUDE_FOLDERS, EXCLUDE_FILES, LABEL_MAPPING, EVAL_FILE, INFERENCE_FILE
 
 def parse_label_studio_json(json_path):
     with open(json_path, 'r', encoding='utf-8') as f:
@@ -89,7 +67,6 @@ def process_neptun_folders():
     for folder in neptun_folders:
         json_files = list(folder.glob("*.json"))
         
-        # Filter out excluded files
         json_files = [f for f in json_files if f.name not in EXCLUDE_FILES]
         
         folder_data = []
@@ -118,7 +95,6 @@ def process_neptun_folders():
     return df
 
 def process_evaluation_file():
-    """Process consensus evaluation file (I1TLYH.json)"""
     if not EVAL_FILE.exists():
         print(f"Evaluation file not found: {EVAL_FILE}")
         return None
@@ -145,7 +121,6 @@ def process_evaluation_file():
 
 
 def process_inference_file():
-    """Process inference demo file (E77YIW/mak_aszf_cimkezes.json)"""
     if not INFERENCE_FILE.exists():
         print(f"Inference file not found: {INFERENCE_FILE}")
         return None
@@ -239,13 +214,6 @@ def print_summary(neptun_df, eval_df, inference_df):
         for label, count in inference_df['label'].value_counts().sort_index().items():
             percentage = (count / len(inference_df)) * 100
             print(f"    Class {label}: {count:3d} sample ({percentage:5.1f}%)")
-    
-    print("\n" + "="*60)
-    print("Next steps:")
-    print("  1. neptun_data.csv -> Train/Val/Test split")
-    print("  2. evaluation.csv -> Final model evaluation")
-    print("  3. inference_demo.csv -> Inference demonstration")
-    print("="*60)
 
 def main():
     try:

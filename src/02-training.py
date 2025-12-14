@@ -1,9 +1,3 @@
-"""
-Training script for legal text difficulty classification.
-Implements both baseline (TF-IDF + Logistic Regression) and 
-fine-tuned HuBERT-large model with regularization techniques.
-"""
-
 import os
 import json
 import time
@@ -25,18 +19,16 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from config import *
+from utils import setup_logger, set_seed
 
-torch.manual_seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(RANDOM_SEED)
+logger = setup_logger("training")
+
+set_seed(RANDOM_SEED)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
+logger.info(f"Using device: {device}")
 
 class LegalTextDataset(Dataset):
-    """PyTorch Dataset for legal text classification."""
-    
     def __init__(self, texts, labels, tokenizer, max_length=MAX_LENGTH):
         self.texts = texts
         self.labels = labels
@@ -63,14 +55,10 @@ class LegalTextDataset(Dataset):
         return {
             'input_ids': encoding['input_ids'].flatten(),
             'attention_mask': encoding['attention_mask'].flatten(),
-            'label': torch.tensor(label - 1, dtype=torch.long)  # Convert 1-5 to 0-4
+            'label': torch.tensor(label - 1, dtype=torch.long)
         }
 
 class HuBERTClassifier(nn.Module):
-    """
-    HuBERT-based text classifier with regularization.
-    """
-    
     def __init__(self, model_name=MODEL_NAME, num_classes=NUM_CLASSES, 
                  dropout_rate=DROPOUT_RATE, hidden_size=CLASSIFIER_HIDDEN_SIZE):
         super(HuBERTClassifier, self).__init__()
@@ -109,12 +97,6 @@ class HuBERTClassifier(nn.Module):
         return logits
 
 def train_baseline_model(train_df, val_df):
-    """
-    Train baseline TF-IDF + Logistic Regression model.
-    
-    This serves as a simple baseline to compare against the deep learning model.
-    """
-
     print("TRAINING BASELINE MODEL (TF-IDF + Logistic Regression)")
     
     vectorizer = TfidfVectorizer(
@@ -164,7 +146,6 @@ def train_baseline_model(train_df, val_df):
     }
 
 def train_epoch(model, dataloader, criterion, optimizer, scheduler, device, accumulation_steps, scaler=None):
-    """Train for one epoch with gradient accumulation and optional mixed precision."""
     model.train()
     total_loss = 0
     all_preds = []
@@ -212,7 +193,6 @@ def train_epoch(model, dataloader, criterion, optimizer, scheduler, device, accu
         
         progress_bar.set_postfix({'loss': loss.item() * accumulation_steps})
         
-        # Log every N batches for file output
         if (idx + 1) % LOG_INTERVAL == 0:
             print(f"  Batch {idx+1}/{len(dataloader)} | Loss: {loss.item() * accumulation_steps:.4f}")
     
@@ -224,7 +204,6 @@ def train_epoch(model, dataloader, criterion, optimizer, scheduler, device, accu
 
 
 def evaluate(model, dataloader, criterion, device):
-    """Evaluate model on validation/test set."""
     model.eval()
     total_loss = 0
     all_preds = []
