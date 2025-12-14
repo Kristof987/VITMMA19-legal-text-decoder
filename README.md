@@ -221,7 +221,7 @@ The repository is structured as follows:
     - `config.py`: Configuration file containing hyperparameters (e.g., epochs) and paths.
     - `convert_raw_data.py`: The script extracts labeled texts and numeric labels from raw Label Studio JSON files, then exports them in CSV and JSON format split into three datasets (train/neptun, evaluation, inference demo).
     - `utils.py`: Helper functions and utilities used across different scripts.
-    - 'models.py': Model architectures for legal text difficulty classification.
+    - `models.py`: Model architectures for legal text difficulty classification.
 
 - **`notebook/`**: Contains Jupyter notebooks for analysis and experimentation.
     - `01-data-exploration.ipynb`: Notebook for initial exploratory data analysis (EDA) and visualization.
