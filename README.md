@@ -200,7 +200,6 @@ docker build -t my-dl-project-work-app:1.0 .
 
 To run the solution, use the following command. Log folder with the log file has to be created before running the script. It is default existing in the repo.
 
-**In Windows PowerShell**:
 ```bash
 docker run --rm --gpus all -v "$(pwd)/data:/data" -v "$(pwd)/output:/app/output" -v "$(pwd)/log:/log" my-dl-project-work-app:1.0 > log/run.log 2>&1
 ```
@@ -211,8 +210,6 @@ docker run --rm --gpus all -v "$(pwd)/data:/data" -v "$(pwd)/output:/app/output"
 
 
 ### File Structure and Functions
-
-[Update according to the final file structure.]
 
 The repository is structured as follows:
 
