@@ -1,9 +1,7 @@
-import os
 import json
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from sklearn.metrics import (
@@ -18,6 +16,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import warnings
+import joblib
 warnings.filterwarnings('ignore')
 
 from config import *
@@ -138,8 +137,6 @@ def evaluate_baseline(test_df):
     print("\n" + "="*60)
     print("EVALUATING BASELINE MODEL")
     print("="*60)
-    
-    import joblib
     
     vectorizer = joblib.load(MODEL_DIR / "baseline_vectorizer.pkl")
     clf = joblib.load(MODEL_DIR / "baseline_model.pkl")
