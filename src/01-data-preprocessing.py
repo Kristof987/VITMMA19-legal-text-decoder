@@ -1,13 +1,5 @@
 """
-Data Preprocessing Script
-Loads, cleans, and preprocesses the raw data for training.
-
-Key concepts applied:
-- Train/Validation/Test split (avoiding overfitting)
-- Text normalization and cleaning
-- Tokenization preparation
-- Data augmentation for regularization
-- Stratified sampling for balanced splits
+TODO: leírás
 """
 
 import pandas as pd
@@ -16,16 +8,11 @@ import json
 import re
 from pathlib import Path
 from sklearn.model_selection import train_test_split
-from collections import Counter
 
-# Paths
+from config import RANDOM_SEED, TEST_SIZE, VAL_SIZE
+
 PROCESSED_DIR = Path("/data/processed")
 OUTPUT_DIR = Path("/data/output")
-
-# Configuration
-RANDOM_SEED = 42
-TEST_SIZE = 0.15
-VAL_SIZE = 0.15  # From remaining after test split
 
 np.random.seed(RANDOM_SEED)
 
@@ -33,20 +20,10 @@ np.random.seed(RANDOM_SEED)
 def clean_text(text):
     """
     Clean and normalize text data.
-    
-    Args:
-        text: Input text string
-        
-    Returns:
-        Cleaned text string
     """
-    # Remove extra whitespace
+
     text = re.sub(r'\s+', ' ', text)
-    
-    # Remove leading/trailing whitespace
     text = text.strip()
-    
-    # Normalize unicode characters
     text = text.replace('\xa0', ' ')
     
     return text
@@ -55,46 +32,35 @@ def clean_text(text):
 def validate_data(df, dataset_name):
     """
     Validate dataset for quality issues.
-    
-    Args:
-        df: DataFrame to validate
-        dataset_name: Name of the dataset for logging
     """
-    print(f"\n{'='*60}")
     print(f"Validating {dataset_name}")
-    print(f"{'='*60}")
     
-    # Check for missing values
     missing = df.isnull().sum()
     if missing.any():
         print(f"WARNING: Missing values found:")
         print(missing[missing > 0])
     else:
-        print("✓ No missing values")
+        print("No missing values")
     
-    # Check for empty texts
     empty_texts = df['text'].str.strip().str.len() == 0
     if empty_texts.any():
         print(f"WARNING: {empty_texts.sum()} empty texts found")
         df = df[~empty_texts].copy()
     else:
-        print("✓ No empty texts")
+        print("No empty texts")
     
-    # Check for duplicates
     duplicates = df.duplicated(subset=['text'])
     if duplicates.any():
         print(f"INFO: {duplicates.sum()} duplicate texts found")
     else:
-        print("✓ No duplicates")
+        print("No duplicates")
     
-    # Check label distribution
     print(f"\nLabel distribution:")
     label_counts = df['label'].value_counts().sort_index()
     for label, count in label_counts.items():
         pct = (count / len(df)) * 100
         print(f"  Label {label}: {count:4d} ({pct:5.1f}%)")
     
-    # Check text length statistics
     text_lengths = df['text'].str.len()
     print(f"\nText length statistics:")
     print(f"  Min: {text_lengths.min()}")
@@ -103,7 +69,6 @@ def validate_data(df, dataset_name):
     print(f"  Median: {text_lengths.median():.1f}")
     
     return df
-
 
 
 def augment_text(text, augmentation_type='synonym'):
@@ -126,13 +91,11 @@ def augment_text(text, augmentation_type='synonym'):
         return text
     
     if augmentation_type == 'swap':
-        # Random word swap (simple augmentation)
         if len(words) >= 2:
             idx1, idx2 = np.random.choice(len(words), 2, replace=False)
             words[idx1], words[idx2] = words[idx2], words[idx1]
     
     elif augmentation_type == 'delete':
-        # Random word deletion (10% of words)
         num_to_delete = max(1, int(len(words) * 0.1))
         indices_to_delete = np.random.choice(len(words), num_to_delete, replace=False)
         words = [w for i, w in enumerate(words) if i not in indices_to_delete]
@@ -159,15 +122,12 @@ def create_augmented_samples(df, augmentation_ratio=0.2, min_samples_per_class=2
     for label in df['label'].unique():
         label_df = df[df['label'] == label]
         
-        # Only augment if class has fewer samples than threshold
         if len(label_df) < min_samples_per_class:
             num_to_augment = int(len(label_df) * augmentation_ratio)
             
-            # Sample texts to augment
             samples_to_augment = label_df.sample(n=num_to_augment, replace=True, random_state=RANDOM_SEED)
             
             for _, row in samples_to_augment.iterrows():
-                # Apply random augmentation
                 aug_type = np.random.choice(['swap', 'delete'])
                 augmented_text = augment_text(row['text'], aug_type)
                 
@@ -203,7 +163,6 @@ def stratified_split(df, test_size, val_size, random_state=42):
     Returns:
         train_df, val_df, test_df
     """
-    # First split: separate test set
     train_val_df, test_df = train_test_split(
         df,
         test_size=test_size,
@@ -211,8 +170,6 @@ def stratified_split(df, test_size, val_size, random_state=42):
         random_state=random_state
     )
     
-    # Second split: separate validation from training
-    # Adjust val_size to be relative to train_val size
     val_size_adjusted = val_size / (1 - test_size)
     
     train_df, val_df = train_test_split(
@@ -233,9 +190,7 @@ def compute_statistics(train_df, val_df, test_df):
     Args:
         train_df, val_df, test_df: DataFrames for each split
     """
-    print(f"\n{'='*60}")
-    print("Dataset Split Statistics")
-    print(f"{'='*60}")
+    print("Dataset split statistics")
     
     for name, df in [('Train', train_df), ('Validation', val_df), ('Test', test_df)]:
         print(f"\n{name} Set:")
@@ -247,7 +202,6 @@ def compute_statistics(train_df, val_df, test_df):
             pct = (count / len(df)) * 100
             print(f"    Label {label}: {count:4d} ({pct:5.1f}%)")
         
-        # Text length statistics
         text_lengths = df['text'].str.len()
         print(f"  Text length: mean={text_lengths.mean():.1f}, "
               f"median={text_lengths.median():.1f}, "
@@ -265,52 +219,41 @@ def save_splits(train_df, val_df, test_df, output_dir):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save as CSV
     train_df.to_csv(output_dir / "train.csv", index=False, encoding='utf-8')
     val_df.to_csv(output_dir / "val.csv", index=False, encoding='utf-8')
     test_df.to_csv(output_dir / "test.csv", index=False, encoding='utf-8')
     
-    # Save as JSON (for compatibility)
     train_df.to_json(output_dir / "train.json", orient='records', force_ascii=False, indent=2)
     val_df.to_json(output_dir / "val.json", orient='records', force_ascii=False, indent=2)
     test_df.to_json(output_dir / "test.json", orient='records', force_ascii=False, indent=2)
     
-    print(f"\n{'='*60}")
     print("Saved preprocessed data:")
     print(f"  {output_dir / 'train.csv'} ({len(train_df)} samples)")
     print(f"  {output_dir / 'val.csv'} ({len(val_df)} samples)")
     print(f"  {output_dir / 'test.csv'} ({len(test_df)} samples)")
-    print(f"{'='*60}")
-
 
 def main():
     """
     Main preprocessing pipeline.
     
     Pipeline steps:
-    1. Load processed data from convert_raw_data.py
+    1. Load processed data from neptun_data.csv
     2. Validate and clean data
     3. Apply text augmentation for regularization
     4. Perform stratified train/val/test split
     5. Save preprocessed splits
     """
-    print("="*60)
-    print("DATA PREPROCESSING PIPELINE")
-    print("="*60)
-    
-    # Load processed data
+    print("\nDATA PREPROCESSING PIPELINE")
+
     print("\nLoading processed data...")
     neptun_df = pd.read_csv(PROCESSED_DIR / "neptun_data.csv")
-    print(f"Loaded {len(neptun_df)} samples from NEPTUN dataset")
+    print(f"Loaded {len(neptun_df)} samples from Train dataset")
     
-    # Validate and clean
-    neptun_df = validate_data(neptun_df, "NEPTUN Dataset")
+    neptun_df = validate_data(neptun_df, "Train Dataset")
     
-    # Clean text
     print("\nCleaning text data...")
     neptun_df['text'] = neptun_df['text'].apply(clean_text)
     
-    # Apply data augmentation (regularization technique)
     print("\nApplying data augmentation for regularization...")
     neptun_df = create_augmented_samples(
         neptun_df,
@@ -318,7 +261,6 @@ def main():
         min_samples_per_class=250
     )
     
-    # Perform stratified split
     print(f"\nPerforming stratified split...")
     print(f"  Test size: {TEST_SIZE*100:.0f}%")
     print(f"  Validation size: {VAL_SIZE*100:.0f}%")
@@ -331,13 +273,10 @@ def main():
         random_state=RANDOM_SEED
     )
     
-    # Compute and display statistics
     compute_statistics(train_df, val_df, test_df)
     
-    # Save splits
     save_splits(train_df, val_df, test_df, PROCESSED_DIR)
-    
-    # Save metadata
+
     metadata = {
         'total_samples': len(neptun_df),
         'train_samples': len(train_df),

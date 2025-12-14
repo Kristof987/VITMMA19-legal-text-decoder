@@ -205,3 +205,22 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project specific
+# Data directories
+data/
+
+# Output directories
+output/
+
+# Log files
+log/
+*.log
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Jupyter notebook outputs
+*-output.ipynb

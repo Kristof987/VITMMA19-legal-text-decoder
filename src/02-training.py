@@ -1,91 +1,43 @@
 """
-Training Script for Legal Text Readability Classification
-
-This script implements:
-- Baseline model (TF-IDF + Logistic Regression)
-- Fine-tuned Hungarian BERT model
-- Mixed precision training
-- Early stopping and checkpointing
-- Comprehensive logging
+Training script for legal text difficulty classification.
+Implements both baseline (TF-IDF + Logistic Regression) and 
+fine-tuned HuBERT-large model with regularization techniques.
 """
 
+import os
+import json
+import time
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
-import pandas as pd
-import numpy as np
-from pathlib import Path
-import logging
-import json
-import gc
-from datetime import datetime
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from transformers import AutoTokenizer, AutoModel
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
-from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
+from sklearn.metrics import accuracy_score, f1_score
+from pathlib import Path
+from tqdm import tqdm
+import sys
 import warnings
 warnings.filterwarnings('ignore')
 
-# Import configuration
-import config
+from config import *
 
-# ============================================================================
-# SETUP LOGGING
-# ============================================================================
+torch.manual_seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(RANDOM_SEED)
 
-def setup_logger():
-    """Setup logging to both file and console."""
-    log_file = Path(config.LOG_FILE)
-    log_file.parent.mkdir(parents=True, exist_ok=True)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+class LegalTextDataset(Dataset):
+    """PyTorch Dataset for legal text classification."""
     
-    # Create logger
-    logger = logging.getLogger('training')
-    logger.setLevel(logging.INFO)
-    
-    # File handler
-    fh = logging.FileHandler(log_file, mode='w')
-    fh.setLevel(logging.INFO)
-    
-    # Console handler
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    
-    # Formatter
-    formatter = logging.Formatter('%(message)s')
-    fh.setFormatter(formatter)
-    ch.setFormatter(formatter)
-    
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    
-    return logger
-
-logger = setup_logger()
-
-# ============================================================================
-# REPRODUCIBILITY
-# ============================================================================
-
-def set_seed(seed):
-    """Set random seeds for reproducibility."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    logger.info(f"Random seed set to: {seed}")
-
-
-# ============================================================================
-# DATA LOADING
-# ============================================================================
-
-class TextDataset(Dataset):
-    """
-    Custom Dataset for text classification with BERT tokenization.
-    """
-    def __init__(self, texts, labels, tokenizer, max_length):
+    def __init__(self, texts, labels, tokenizer, max_length=MAX_LENGTH):
         self.texts = texts
         self.labels = labels
         self.tokenizer = tokenizer
@@ -98,304 +50,204 @@ class TextDataset(Dataset):
         text = str(self.texts[idx])
         label = self.labels[idx]
         
-        # Tokenize
         encoding = self.tokenizer(
             text,
             add_special_tokens=True,
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
+            return_attention_mask=True,
             return_tensors='pt'
         )
         
         return {
             'input_ids': encoding['input_ids'].flatten(),
             'attention_mask': encoding['attention_mask'].flatten(),
-            'label': torch.tensor(label - 1, dtype=torch.long)  # 0-indexed
+            'label': torch.tensor(label - 1, dtype=torch.long)  # Convert 1-5 to 0-4
         }
 
-
-def load_data():
-    """Load train and validation datasets."""
-    logger.info("\n" + "="*60)
-    logger.info("DATA LOADING")
-    logger.info("="*60)
-    
-    train_df = pd.read_csv(config.DATA_DIR / "train.csv")
-    val_df = pd.read_csv(config.DATA_DIR / "val.csv")
-    
-    logger.info(f"✓ Train samples: {len(train_df)}")
-    logger.info(f"✓ Validation samples: {len(val_df)}")
-    
-    # Log label distribution
-    logger.info("\nTrain label distribution:")
-    for label, count in train_df['label'].value_counts().sort_index().items():
-        pct = (count / len(train_df)) * 100
-        logger.info(f"  Label {label}: {count:4d} ({pct:5.1f}%)")
-    
-    return train_df, val_df
-
-
-def create_dataloaders(train_df, val_df, tokenizer):
-    """Create PyTorch DataLoaders."""
-    train_dataset = TextDataset(
-        train_df['text'].values,
-        train_df['label'].values,
-        tokenizer,
-        config.MAX_LENGTH
-    )
-    
-    val_dataset = TextDataset(
-        val_df['text'].values,
-        val_df['label'].values,
-        tokenizer,
-        config.MAX_LENGTH
-    )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.BATCH_SIZE,
-        shuffle=True,
-        num_workers=0,  # Reduced to save memory
-        pin_memory=False  # Disabled to save memory
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.BATCH_SIZE,
-        shuffle=False,
-        num_workers=0,  # Reduced to save memory
-        pin_memory=False  # Disabled to save memory
-    )
-    
-    logger.info(f"\n✓ DataLoaders created")
-    logger.info(f"  Batch size: {config.BATCH_SIZE}")
-    logger.info(f"  Train batches: {len(train_loader)}")
-    logger.info(f"  Val batches: {len(val_loader)}")
-    
-    return train_loader, val_loader
-
-
-# ============================================================================
-# BASELINE MODEL
-# ============================================================================
-
-def train_baseline(train_df, val_df):
+class HuBERTClassifier(nn.Module):
     """
-    Train baseline model: TF-IDF + Logistic Regression.
-    Provides a simple benchmark for comparison.
+    HuBERT-based text classifier with regularization.
     """
-    logger.info("\n" + "="*60)
-    logger.info("BASELINE MODEL")
-    logger.info("="*60)
-    logger.info("Model: TF-IDF + Logistic Regression")
     
-    # TF-IDF vectorization
+    def __init__(self, model_name=MODEL_NAME, num_classes=NUM_CLASSES, 
+                 dropout_rate=DROPOUT_RATE, hidden_size=CLASSIFIER_HIDDEN_SIZE):
+        super(HuBERTClassifier, self).__init__()
+        
+        self.hubert = AutoModel.from_pretrained(model_name)
+        
+        for param in self.hubert.embeddings.parameters():
+            param.requires_grad = False
+        
+        for layer in self.hubert.encoder.layer[:-4]:
+            for param in layer.parameters():
+                param.requires_grad = False
+        
+        self.dropout1 = nn.Dropout(dropout_rate)
+        self.fc1 = nn.Linear(HIDDEN_SIZE, hidden_size)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
+        self.relu = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout_rate)
+        self.fc2 = nn.Linear(hidden_size, num_classes)
+    
+    def forward(self, input_ids, attention_mask):
+        outputs = self.hubert(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )
+        
+        pooled_output = outputs.last_hidden_state[:, 0, :]
+        
+        x = self.dropout1(pooled_output)
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout2(x)
+        logits = self.fc2(x)
+        
+        return logits
+
+def train_baseline_model(train_df, val_df):
+    """
+    Train baseline TF-IDF + Logistic Regression model.
+    
+    This serves as a simple baseline to compare against the deep learning model.
+    """
+
+    print("TRAINING BASELINE MODEL (TF-IDF + Logistic Regression)")
+    
     vectorizer = TfidfVectorizer(
-        max_features=config.BASELINE_MAX_FEATURES,
-        ngram_range=config.BASELINE_NGRAM_RANGE,
-        min_df=2
+        max_features=BASELINE_MAX_FEATURES,
+        ngram_range=BASELINE_NGRAM_RANGE,
+        min_df=2,
+        max_df=0.95
     )
     
     X_train = vectorizer.fit_transform(train_df['text'])
     X_val = vectorizer.transform(val_df['text'])
-    y_train = train_df['label'].values
-    y_val = val_df['label'].values
+    y_train = train_df['label'].values - 1
+    y_val = val_df['label'].values - 1
     
-    # Train logistic regression
     clf = LogisticRegression(
-        multi_class='multinomial',
         max_iter=1000,
-        random_state=config.RANDOM_SEED
+        C=1.0,
+        class_weight='balanced',
+        random_state=RANDOM_SEED,
+        n_jobs=-1
     )
+    
     clf.fit(X_train, y_train)
     
-    # Evaluate
     train_pred = clf.predict(X_train)
     val_pred = clf.predict(X_val)
     
     train_acc = accuracy_score(y_train, train_pred)
     val_acc = accuracy_score(y_val, val_pred)
+    train_f1 = f1_score(y_train, train_pred, average='weighted')
     val_f1 = f1_score(y_val, val_pred, average='weighted')
     
-    logger.info(f"\nBaseline Results:")
-    logger.info(f"  Train Accuracy: {train_acc:.4f}")
-    logger.info(f"  Val Accuracy: {val_acc:.4f}")
-    logger.info(f"  Val F1-Score: {val_f1:.4f}")
+    print(f"\nBaseline results:")
+    print(f"  Train accuracy: {train_acc:.4f} | Train F1: {train_f1:.4f}")
+    print(f"  Val accuracy:   {val_acc:.4f} | Val F1:   {val_f1:.4f}")
+    
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    import joblib
+    joblib.dump(vectorizer, MODEL_DIR / "baseline_vectorizer.pkl")
+    joblib.dump(clf, MODEL_DIR / "baseline_model.pkl")
     
     return {
         'train_acc': train_acc,
         'val_acc': val_acc,
+        'train_f1': train_f1,
         'val_f1': val_f1
     }
 
-
-# ============================================================================
-# BERT MODEL
-# ============================================================================
-
-class HungarianBERTClassifier(nn.Module):
-    """
-    Hungarian BERT model with classification head.
-    
-    Architecture:
-    - Pre-trained BERT encoder
-    - Dropout for regularization
-    - Two-layer classification head
-    """
-    def __init__(self, num_classes=config.NUM_CLASSES, dropout=config.DROPOUT_RATE):
-        super(HungarianBERTClassifier, self).__init__()
-        
-        # Load pre-trained BERT
-        self.bert = AutoModel.from_pretrained(config.MODEL_NAME)
-        
-        # Classification head
-        self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Sequential(
-            nn.Linear(config.HIDDEN_SIZE, config.CLASSIFIER_HIDDEN_SIZE),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(config.CLASSIFIER_HIDDEN_SIZE, num_classes)
-        )
-    
-    def forward(self, input_ids, attention_mask):
-        # BERT encoding
-        outputs = self.bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
-        
-        # Use [CLS] token representation
-        pooled_output = outputs.last_hidden_state[:, 0, :]
-        
-        # Apply dropout
-        pooled_output = self.dropout(pooled_output)
-        
-        # Classification
-        logits = self.classifier(pooled_output)
-        
-        return logits
-
-
-def count_parameters(model):
-    """Count trainable parameters in model."""
-    total = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    return total, trainable
-
-
-# ============================================================================
-# EARLY STOPPING
-# ============================================================================
-
-class EarlyStopping:
-    """
-    Early stopping to prevent overfitting.
-    Stops training if validation loss doesn't improve for patience epochs.
-    """
-    def __init__(self, patience=config.EARLY_STOPPING_PATIENCE, min_delta=0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_loss = None
-        self.early_stop = False
-        self.best_epoch = 0
-    
-    def __call__(self, val_loss, epoch):
-        if self.best_loss is None:
-            self.best_loss = val_loss
-            self.best_epoch = epoch
-        elif val_loss > self.best_loss - self.min_delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-                logger.info(f"\nEarly stopping triggered after {self.counter} epochs without improvement")
-        else:
-            self.best_loss = val_loss
-            self.best_epoch = epoch
-            self.counter = 0
-        
-        return self.early_stop
-
-
-# ============================================================================
-# TRAINING FUNCTIONS
-# ============================================================================
-
-def train_epoch(model, dataloader, optimizer, criterion, scheduler, scaler, device, epoch):
-    """Train for one epoch with gradient accumulation."""
+def train_epoch(model, dataloader, criterion, optimizer, scheduler, device, accumulation_steps, scaler=None):
+    """Train for one epoch with gradient accumulation and optional mixed precision."""
     model.train()
     total_loss = 0
-    correct = 0
-    total = 0
+    all_preds = []
+    all_labels = []
     
     optimizer.zero_grad()
     
-    for batch_idx, batch in enumerate(dataloader):
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['label'].to(device)
+    progress_bar = tqdm(dataloader, desc="Training", ascii=True, ncols=100)
+    for idx, batch in enumerate(progress_bar):
+        input_ids = batch['input_ids'].to(device, non_blocking=True)
+        attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+        labels = batch['label'].to(device, non_blocking=True)
         
-        # Mixed precision forward pass
-        with autocast(enabled=config.USE_MIXED_PRECISION):
-            outputs = model(input_ids, attention_mask)
-            loss = criterion(outputs, labels)
-            # Scale loss for gradient accumulation
-            loss = loss / config.ACCUMULATION_STEPS
-        
-        # Backward pass with gradient scaling
-        scaler.scale(loss).backward()
-        
-        # Optimizer step every ACCUMULATION_STEPS
-        if (batch_idx + 1) % config.ACCUMULATION_STEPS == 0:
-            # Gradient clipping
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.GRADIENT_CLIP_VALUE)
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                logits = model(input_ids, attention_mask)
+                loss = criterion(logits, labels) / accumulation_steps
             
-            # Optimizer step
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            scheduler.step()
+            scaler.scale(loss).backward()
+            
+            if (idx + 1) % accumulation_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_VALUE)
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad()
+        else:
+            logits = model(input_ids, attention_mask)
+            loss = criterion(logits, labels) / accumulation_steps
+            loss.backward()
+            
+            if (idx + 1) % accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_VALUE)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
         
-        # Metrics (use unscaled loss for logging)
-        total_loss += loss.item() * config.ACCUMULATION_STEPS
-        _, predicted = torch.max(outputs, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
+        total_loss += loss.item() * accumulation_steps
         
-        # Log progress
-        if (batch_idx + 1) % config.LOG_INTERVAL == 0:
-            logger.info(f"  Batch [{batch_idx+1}/{len(dataloader)}] "
-                       f"Loss: {loss.item()*config.ACCUMULATION_STEPS:.4f} "
-                       f"Acc: {100*correct/total:.2f}%")
+        with torch.no_grad():
+            preds = torch.argmax(logits, dim=1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+        
+        progress_bar.set_postfix({'loss': loss.item() * accumulation_steps})
+        
+        # Log every N batches for file output
+        if (idx + 1) % LOG_INTERVAL == 0:
+            print(f"  Batch {idx+1}/{len(dataloader)} | Loss: {loss.item() * accumulation_steps:.4f}")
     
     avg_loss = total_loss / len(dataloader)
-    accuracy = correct / total
+    accuracy = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average='weighted')
     
-    return avg_loss, accuracy
+    return avg_loss, accuracy, f1
 
 
-def validate_epoch(model, dataloader, criterion, device):
-    """Validate for one epoch."""
+def evaluate(model, dataloader, criterion, device):
+    """Evaluate model on validation/test set."""
     model.eval()
     total_loss = 0
     all_preds = []
     all_labels = []
     
     with torch.no_grad():
-        for batch in dataloader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['label'].to(device)
+        for batch in tqdm(dataloader, desc="Evaluating", ascii=True, ncols=100):
+            input_ids = batch['input_ids'].to(device, non_blocking=True)
+            attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+            labels = batch['label'].to(device, non_blocking=True)
             
-            outputs = model(input_ids, attention_mask)
-            loss = criterion(outputs, labels)
+            if torch.cuda.is_available() and USE_MIXED_PRECISION:
+                with torch.cuda.amp.autocast():
+                    logits = model(input_ids, attention_mask)
+                    loss = criterion(logits, labels)
+            else:
+                logits = model(input_ids, attention_mask)
+                loss = criterion(logits, labels)
             
             total_loss += loss.item()
-            _, predicted = torch.max(outputs, 1)
             
-            all_preds.extend(predicted.cpu().numpy())
+            preds = torch.argmax(logits, dim=1)
+            all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
     avg_loss = total_loss / len(dataloader)
@@ -404,209 +256,177 @@ def validate_epoch(model, dataloader, criterion, device):
     
     return avg_loss, accuracy, f1, all_preds, all_labels
 
-
-# ============================================================================
-# CHECKPOINTING
-# ============================================================================
-
-def save_checkpoint(model, optimizer, epoch, val_loss, val_acc, val_f1, is_best=False):
-    """Save model checkpoint."""
-    config.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+def main():
+    print("Legal text difficulty classification - training")
     
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'val_loss': val_loss,
-        'val_acc': val_acc,
-        'val_f1': val_f1
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    
+    print("\nLoading preprocessed data...")
+    train_df = pd.read_csv(DATA_DIR / "train.csv")
+    val_df = pd.read_csv(DATA_DIR / "val.csv")
+    
+    print(f"Train samples: {len(train_df)}")
+    print(f"Val samples: {len(val_df)}")
+    
+    baseline_results = train_baseline_model(train_df, val_df)
+    
+    print(f"\nLoading tokenizer: {MODEL_NAME}")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    
+    print("Creating datasets...")
+    train_dataset = LegalTextDataset(
+        train_df['text'].values,
+        train_df['label'].values,
+        tokenizer
+    )
+    val_dataset = LegalTextDataset(
+        val_df['text'].values,
+        val_df['label'].values,
+        tokenizer
+    )
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE * 2,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
+    
+    print(f"\nInitializing model: {MODEL_NAME}")
+    model = HuBERTClassifier().to(device)
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Frozen parameters: {total_params - trainable_params:,}")
+    
+    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+    
+    optimizer = AdamW(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY
+    )
+    
+    total_steps = len(train_loader) * EPOCHS // ACCUMULATION_STEPS
+    warmup_steps = int(total_steps * WARMUP_RATIO)
+    
+    scheduler = CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=total_steps - warmup_steps,
+        T_mult=1,
+        eta_min=1e-7
+    )
+    
+    scaler = torch.cuda.amp.GradScaler() if (USE_MIXED_PRECISION and torch.cuda.is_available()) else None
+    if scaler:
+        print("Mixed precision training enabled (FP16)")
+    
+    print(f"\nStarting training for {EPOCHS} epochs...")
+    print(f"Batch size: {BATCH_SIZE}")
+    print(f"Gradient accumulation steps: {ACCUMULATION_STEPS}")
+    print(f"Effective batch size: {BATCH_SIZE * ACCUMULATION_STEPS}")
+    
+    best_val_f1 = 0
+    patience_counter = 0
+    training_history = []
+    
+    for epoch in range(EPOCHS):
+        print(f"\n{'='*60}")
+        print(f"Epoch {epoch + 1}/{EPOCHS}")
+        print(f"{'='*60}")
+        
+        start_time = time.time()
+        
+        train_loss, train_acc, train_f1 = train_epoch(
+            model, train_loader, criterion, optimizer, scheduler, device, ACCUMULATION_STEPS, scaler
+        )
+        
+        val_loss, val_acc, val_f1, _, _ = evaluate(
+            model, val_loader, criterion, device
+        )
+        
+        epoch_time = time.time() - start_time
+        
+        print(f"\nEpoch {epoch + 1} Results:")
+        print(f"  Train loss: {train_loss:.4f} | Train acc: {train_acc:.4f} | Train F1: {train_f1:.4f}")
+        print(f"  Val loss:   {val_loss:.4f} | Val acc:   {val_acc:.4f} | Val F1:   {val_f1:.4f}")
+        print(f"  Time: {epoch_time:.2f}s")
+        
+        training_history.append({
+            'epoch': epoch + 1,
+            'train_loss': train_loss,
+            'train_acc': train_acc,
+            'train_f1': train_f1,
+            'val_loss': val_loss,
+            'val_acc': val_acc,
+            'val_f1': val_f1,
+            'time': epoch_time
+        })
+        
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            patience_counter = 0
+            
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_f1': val_f1,
+                'val_acc': val_acc,
+            }, MODEL_DIR / "best_model.pt")
+            
+            print(f" New best model saved! (Val F1: {val_f1:.4f})")
+        else:
+            patience_counter += 1
+            print(f"  No improvement. Patience: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
+            
+            if patience_counter >= EARLY_STOPPING_PATIENCE:
+                print(f"\nEarly stopping triggered after {epoch + 1} epochs")
+                break
+    
+    history_df = pd.DataFrame(training_history)
+    history_df.to_csv(MODEL_DIR / "training_history.csv", index=False)
+    
+    results = {
+        'baseline': baseline_results,
+        'hubert': {
+            'best_val_f1': best_val_f1,
+            'total_epochs': len(training_history),
+            'model_name': MODEL_NAME,
+            'total_params': total_params,
+            'trainable_params': trainable_params
+        },
+        'config': {
+            'batch_size': BATCH_SIZE,
+            'learning_rate': LEARNING_RATE,
+            'epochs': EPOCHS,
+            'dropout_rate': DROPOUT_RATE,
+            'weight_decay': WEIGHT_DECAY,
+            'label_smoothing': LABEL_SMOOTHING,
+            'max_length': MAX_LENGTH
+        }
     }
     
-    if is_best:
-        path = config.CHECKPOINT_DIR / "best_model.pt"
-        torch.save(checkpoint, path)
-        logger.info(f"  ✓ Best model saved (Val Loss: {val_loss:.4f})")
-
-
-def load_checkpoint(model, optimizer, checkpoint_path):
-    """Load model checkpoint."""
-    checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    return checkpoint['epoch'], checkpoint['val_loss']
-
-
-# ============================================================================
-# MAIN TRAINING FUNCTION
-# ============================================================================
-
-def main():
-    """Main training pipeline."""
+    with open(MODEL_DIR / "training_results.json", 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
     
-    # Header
-    logger.info("\n" + "="*60)
-    logger.info("LEGAL TEXT READABILITY CLASSIFICATION")
-    logger.info("="*60)
-    logger.info(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Log hyperparameters
-    logger.info("\n" + "="*60)
-    logger.info("HYPERPARAMETERS")
-    logger.info("="*60)
-    logger.info(f"Model: {config.MODEL_NAME}")
-    logger.info(f"Epochs: {config.EPOCHS}")
-    logger.info(f"Batch Size: {config.BATCH_SIZE}")
-    logger.info(f"Learning Rate: {config.LEARNING_RATE}")
-    logger.info(f"Weight Decay: {config.WEIGHT_DECAY}")
-    logger.info(f"Dropout Rate: {config.DROPOUT_RATE}")
-    logger.info(f"Max Length: {config.MAX_LENGTH}")
-    logger.info(f"Warmup Ratio: {config.WARMUP_RATIO}")
-    logger.info(f"Early Stopping Patience: {config.EARLY_STOPPING_PATIENCE}")
-    logger.info(f"Gradient Clip: {config.GRADIENT_CLIP_VALUE}")
-    logger.info(f"Label Smoothing: {config.LABEL_SMOOTHING}")
-    logger.info(f"Mixed Precision: {config.USE_MIXED_PRECISION}")
-    logger.info(f"Random Seed: {config.RANDOM_SEED}")
-    
-    # Set seed
-    set_seed(config.RANDOM_SEED)
-    
-    # Check GPU
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(f"\n✓ Device: {device}")
-    if torch.cuda.is_available():
-        logger.info(f"  GPU: {torch.cuda.get_device_name(0)}")
-        logger.info(f"  Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    
-    # Load data
-    train_df, val_df = load_data()
-    
-    # Train baseline
-    baseline_results = train_baseline(train_df, val_df)
-    
-    # Clear memory after baseline
-    gc.collect()
-    
-    # Initialize tokenizer
-    logger.info("\n" + "="*60)
-    logger.info("INITIALIZING BERT MODEL")
-    logger.info("="*60)
-    logger.info(f"Loading tokenizer: {config.MODEL_NAME}")
-    tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
-    
-    # Create dataloaders
-    train_loader, val_loader = create_dataloaders(train_df, val_df, tokenizer)
-    
-    # Initialize model
-    logger.info(f"\nLoading model: {config.MODEL_NAME}")
-    model = HungarianBERTClassifier().to(device)
-    
-    total_params, trainable_params = count_parameters(model)
-    logger.info(f"\nModel Architecture:")
-    logger.info(f"  Total parameters: {total_params:,}")
-    logger.info(f"  Trainable parameters: {trainable_params:,}")
-    
-    # Setup training
-    criterion = nn.CrossEntropyLoss(label_smoothing=config.LABEL_SMOOTHING)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.LEARNING_RATE,
-        weight_decay=config.WEIGHT_DECAY
-    )
-    
-    # Learning rate scheduler
-    total_steps = len(train_loader) * config.EPOCHS
-    warmup_steps = int(total_steps * config.WARMUP_RATIO)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
-    )
-    
-    logger.info(f"\nTraining Configuration:")
-    logger.info(f"  Total steps: {total_steps}")
-    logger.info(f"  Warmup steps: {warmup_steps}")
-    
-    # Mixed precision scaler
-    scaler = GradScaler(enabled=config.USE_MIXED_PRECISION)
-    
-    # Early stopping
-    early_stopping = EarlyStopping(patience=config.EARLY_STOPPING_PATIENCE)
-    
-    # Training loop
-    logger.info("\n" + "="*60)
-    logger.info("TRAINING")
-    logger.info("="*60)
-    
-    best_val_loss = float('inf')
-    
-    for epoch in range(config.EPOCHS):
-        logger.info(f"\nEpoch {epoch+1}/{config.EPOCHS}")
-        logger.info("-" * 60)
-        
-        # Train
-        train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, criterion, scheduler, scaler, device, epoch
-        )
-        
-        # Validate
-        val_loss, val_acc, val_f1, val_preds, val_labels = validate_epoch(
-            model, val_loader, criterion, device
-        )
-        
-        # Log metrics
-        logger.info(f"\nEpoch {epoch+1} Results:")
-        logger.info(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-        logger.info(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
-        
-        # Save checkpoint
-        is_best = val_loss < best_val_loss
-        if is_best:
-            best_val_loss = val_loss
-            save_checkpoint(model, optimizer, epoch, val_loss, val_acc, val_f1, is_best=True)
-        
-        # Early stopping
-        if early_stopping(val_loss, epoch):
-            logger.info(f"\nBest epoch: {early_stopping.best_epoch + 1}")
-            break
-    
-    # Load best model
-    logger.info("\n" + "="*60)
-    logger.info("FINAL RESULTS")
-    logger.info("="*60)
-    
-    checkpoint_path = config.CHECKPOINT_DIR / "best_model.pt"
-    if checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        logger.info(f"\n✓ Loaded best model from epoch {checkpoint['epoch']+1}")
-        logger.info(f"  Best Val Loss: {checkpoint['val_loss']:.4f}")
-        logger.info(f"  Best Val Acc: {checkpoint['val_acc']:.4f}")
-        logger.info(f"  Best Val F1: {checkpoint['val_f1']:.4f}")
-        
-        # Final validation
-        val_loss, val_acc, val_f1, val_preds, val_labels = validate_epoch(
-            model, val_loader, criterion, device
-        )
-        
-        # Classification report
-        logger.info("\nClassification Report:")
-        # Convert 0-indexed back to 1-indexed for display
-        report = classification_report(
-            [l+1 for l in val_labels],
-            [p+1 for p in val_preds],
-            target_names=[config.LABEL_NAMES[i] for i in range(1, 6)],
-            digits=4
-        )
-        logger.info("\n" + report)
-        
-        # Confusion matrix
-        cm = confusion_matrix([l+1 for l in val_labels], [p+1 for p in val_preds])
-        logger.info("\nConfusion Matrix:")
-        logger.info(str(cm))
-    
-    logger.info("\n" + "="*60)
-    logger.info("TRAINING COMPLETE")
-    logger.info("="*60)
+    print("Training completed!")
+    print("="*60)
+    print(f"\nBest validation F1: {best_val_f1:.4f}")
+    print(f"Models saved to: {MODEL_DIR}")
+    print(f"Training history saved to: {MODEL_DIR / 'training_history.csv'}")
 
 
 if __name__ == "__main__":
