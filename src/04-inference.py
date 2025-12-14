@@ -1,81 +1,21 @@
-import os
-import json
 import argparse
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModel
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
 from config import *
 from utils import setup_logger
+from models import InferenceDataset, HuBERTClassifier
 
 logger = setup_logger("inference")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-class InferenceDataset(Dataset): 
-    def __init__(self, texts, tokenizer, max_length=MAX_LENGTH):
-        self.texts = texts
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-    
-    def __len__(self):
-        return len(self.texts)
-    
-    def __getitem__(self, idx):
-        text = str(self.texts[idx])
-        
-        encoding = self.tokenizer(
-            text,
-            add_special_tokens=True,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_attention_mask=True,
-            return_tensors='pt'
-        )
-        
-        return {
-            'input_ids': encoding['input_ids'].flatten(),
-            'attention_mask': encoding['attention_mask'].flatten(),
-            'text': text
-        }
-
-class HuBERTClassifier(nn.Module):
-    def __init__(self, model_name=MODEL_NAME, num_classes=NUM_CLASSES, 
-                 dropout_rate=DROPOUT_RATE, hidden_size=CLASSIFIER_HIDDEN_SIZE):
-        super(HuBERTClassifier, self).__init__()
-        
-        self.hubert = AutoModel.from_pretrained(model_name)
-        
-        self.dropout1 = nn.Dropout(dropout_rate)
-        self.fc1 = nn.Linear(HIDDEN_SIZE, hidden_size)
-        self.bn1 = nn.BatchNorm1d(hidden_size)
-        self.relu = nn.ReLU()
-        self.dropout2 = nn.Dropout(dropout_rate)
-        self.fc2 = nn.Linear(hidden_size, num_classes)
-    
-    def forward(self, input_ids, attention_mask):
-        outputs = self.hubert(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
-        
-        pooled_output = outputs.last_hidden_state[:, 0, :]
-        
-        x = self.dropout1(pooled_output)
-        x = self.fc1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.dropout2(x)
-        logits = self.fc2(x)
-        
-        return logits
 
 def load_model(model_path, device):
     print(f"Loading model from {model_path}")
